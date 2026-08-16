@@ -38,7 +38,6 @@ customers seeing the "same" item twice in search results.
 product-deduplication-engine/
 ├── README.md
 ├── requirements.txt
-├── .gitignore
 ├── data/
 │   ├── sample_products.xlsx        synthetic 10,500-row test catalog
 │   └── generate_sample_data.py     script that built it
