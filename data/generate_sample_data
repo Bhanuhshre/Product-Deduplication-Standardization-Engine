@@ -1,0 +1,165 @@
+"""
+generate_sample_data.py
+
+Builds a synthetic but realistic product catalog for testing the
+deduplication engine. The data intentionally contains the kind of mess
+you'd find in a real multi-vendor catalog feed: inconsistent casing,
+abbreviated units, misspelled brand names, duplicate listings with
+minor text variations, and a handful of records missing key fields.
+
+Run directly to regenerate data/sample_products.xlsx:
+    python generate_sample_data.py
+"""
+
+import random
+import string
+import pandas as pd
+
+random.seed(42)
+
+BRANDS = [
+    ("Coca-Cola", ["coca cola", "coca-cola", "cocacola", "coke", "Coca Cola"]),
+    ("Pepsi", ["pepsi", "pepsico", "pepsi co", "Pepsi Co"]),
+    ("Nestle", ["nestle", "nesle", "nestle india", "Nestle Ltd"]),
+    ("Britannia", ["britannia", "britannia inds", "britannia industries"]),
+    ("Amul", ["amul", "amul dairy", "gcmmf", "AMUL"]),
+    ("ITC", ["itc", "itc ltd", "itc limited"]),
+    ("Dabur", ["dabur", "dabur india", "Dabur India Ltd"]),
+    ("Colgate-Palmolive", ["colgate", "colgate palmolive", "colgate-palmolive"]),
+    ("Haldiram's", ["haldiram", "haldirams", "Haldiram's"]),
+    ("Parle", ["parle", "parle g", "parle products"]),
+    ("Patanjali", ["patanjali", "patanjali ayurved"]),
+    ("Cadbury", ["cadbury", "mondelez", "cadbury india"]),
+    ("MTR", ["mtr", "mtr foods"]),
+    ("Hindustan Unilever", ["hul", "unilever", "hindustan unilever ltd"]),
+    ("Johnson & Johnson", ["j&j", "johnson & johnson", "johnson and johnson"]),
+]
+
+PRODUCT_TEMPLATES = {
+    "Dairy": ["Toned Milk", "Full Cream Milk", "Curd", "Paneer", "Ghee", "Butter", "Cheese Slices", "Yogurt"],
+    "Beverages": ["Cola", "Lemon Soda", "Orange Juice", "Mango Drink", "Packaged Drinking Water", "Iced Tea", "Instant Coffee"],
+    "Snacks": ["Potato Chips", "Salted Namkeen", "Cream Biscuit", "Glucose Biscuit", "Chocolate Wafer", "Mixture", "Peanut Chikki"],
+    "Personal Care": ["Bathing Soap", "Anti-Dandruff Shampoo", "Toothpaste", "Body Lotion", "Face Cream", "Deodorant Spray"],
+    "Staples": ["Basmati Rice", "Wheat Atta", "Toor Dal", "Refined Sunflower Oil", "Sugar", "Iodized Salt", "Besan"],
+    "Home Care": ["Detergent Powder", "Dishwash Bar", "Floor Cleaner", "White Phenyl", "Toilet Cleaner"],
+}
+
+UNIT_VARIANTS = {
+    "g": ["g", "gm", "gms", "gram", "grams", "grm"],
+    "kg": ["kg", "kgs", "kilogram", "kilograms"],
+    "ml": ["ml", "mls", "milliliter", "millilitre"],
+    "l": ["l", "ltr", "ltrs", "litre", "liter", "litres"],
+    "pc": ["pc", "pcs", "piece", "pieces"],
+    "pack": ["pack", "pk", "packs"],
+}
+
+SIZE_OPTIONS = {
+    "g": [50, 100, 150, 200, 250, 500, 750, 1000],
+    "kg": [1, 2, 5],
+    "ml": [100, 200, 250, 500, 750, 1000],
+    "l": [1, 2, 5],
+    "pc": [1, 2, 4, 6, 12],
+    "pack": [1, 2, 3, 6],
+}
+
+VENDORS = ["VendorA_Feed", "VendorB_Feed", "MarketplaceSync", "ManualEntry", "LegacyImport", "SupplierPortal"]
+
+NOISE_CHARS = ["  ", " - ", " -- ", "  ,", " ."]
+
+
+def messy_case(text):
+    r = random.random()
+    if r < 0.25:
+        return text.upper()
+    if r < 0.5:
+        return text.lower()
+    if r < 0.65:
+        return text.title()
+    return text
+
+
+def add_noise(text):
+    if random.random() < 0.15:
+        text = text + random.choice(NOISE_CHARS).strip()
+    if random.random() < 0.1:
+        pos = random.randint(0, len(text))
+        text = text[:pos] + random.choice(NOISE_CHARS) + text[pos:]
+    return text
+
+
+def typo(text):
+    if len(text) < 4 or random.random() > 0.12:
+        return text
+    idx = random.randint(1, len(text) - 2)
+    chars = list(text)
+    swap_type = random.choice(["dup", "drop", "swap"])
+    if swap_type == "dup":
+        chars.insert(idx, chars[idx])
+    elif swap_type == "drop":
+        chars.pop(idx)
+    else:
+        chars[idx], chars[idx + 1] = chars[idx + 1], chars[idx]
+    return "".join(chars)
+
+
+def build_record(record_id, category, base_name, brand_std, brand_variant, size, unit, unit_variant, vendor):
+    name_core = f"{brand_variant} {base_name} {size}{unit_variant}"
+    name_core = messy_case(name_core)
+    name_core = add_noise(name_core)
+    if random.random() < 0.1:
+        name_core = typo(name_core)
+
+    price = round(random.uniform(15, 850), 2)
+    if random.random() < 0.05:
+        price = None  # missing price -> exception candidate
+
+    sku = f"SKU{record_id:06d}"
+
+    row = {
+        "product_id": sku,
+        "raw_product_name": name_core,
+        "brand_raw": brand_variant if random.random() > 0.05 else None,
+        "category": category if random.random() > 0.03 else None,
+        "size_value": size,
+        "size_unit_raw": unit_variant,
+        "price": price,
+        "vendor_source": vendor,
+        "true_brand": brand_std,       # ground truth, used only for eval, not by pipeline
+        "true_base_name": base_name,   # ground truth
+    }
+    return row
+
+
+def generate(n_unique=4200, duplicate_rate=1.4, total_target=10500):
+    records = []
+    rid = 1
+
+    unique_combos = []
+    for _ in range(n_unique):
+        brand_std, variants = random.choice(BRANDS)
+        category = random.choice(list(PRODUCT_TEMPLATES.keys()))
+        base_name = random.choice(PRODUCT_TEMPLATES[category])
+        unit = random.choice(list(SIZE_OPTIONS.keys()))
+        size = random.choice(SIZE_OPTIONS[unit])
+        unique_combos.append((brand_std, variants, category, base_name, unit, size))
+
+    while len(records) < total_target:
+        brand_std, variants, category, base_name, unit, size = random.choice(unique_combos)
+        brand_variant = random.choice(variants)
+        unit_variant = random.choice(UNIT_VARIANTS[unit])
+        vendor = random.choice(VENDORS)
+        row = build_record(rid, category, base_name, brand_std, brand_variant, size, unit, unit_variant, vendor)
+        records.append(row)
+        rid += 1
+
+    df = pd.DataFrame(records)
+    # shuffle so duplicates aren't adjacent, mimicking a real multi-vendor dump
+    df = df.sample(frac=1, random_state=7).reset_index(drop=True)
+    return df
+
+
+if __name__ == "__main__":
+    df = generate()
+    out_path = "sample_products.xlsx"
+    df.to_excel(out_path, index=False, sheet_name="raw_catalog")
+    print(f"Generated {len(df)} rows -> {out_path}")
